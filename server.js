@@ -1,6 +1,7 @@
 import express from "express";
 import helmet from "helmet";
 import morgan from "morgan";
+import cors from "cors";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
 import { Low } from "lowdb";
@@ -12,30 +13,47 @@ const __dirname = dirname(__filename);
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Detrás de proxy (Hostinger) para que req.ip y x-forwarded-* funcionen bien
+// Detrás de proxy (Render) para req.ip y x-forwarded-*
 app.set("trust proxy", 1);
 
-// Seguridad + logs + JSON
+// ===== Seguridad + logs + JSON =====
 app.use(helmet());
 app.use(morgan(process.env.NODE_ENV === "production" ? "combined" : "dev"));
 app.use(express.json());
 
-// Servir frontend (index.html, css, js)
-app.use(express.static(__dirname));
+// ===== CORS: permite tu frontend en Hostinger =====
+const ALLOWED_ORIGINS = [
+  "https://nakedcode.es",
+  "https://www.nakedcode.es",
+];
+app.use(
+  cors({
+    origin: (origin, cb) => {
+      // Permite también llamadas sin origin (curl/Postman)
+      if (!origin) return cb(null, true);
+      if (ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
+      return cb(new Error("Not allowed by CORS"));
+    },
+    methods: ["GET", "POST"],
+  })
+);
 
-// === DB con lowdb (JSON plano) ===
+// ===== Base de datos (lowdb con JSON) =====
 const file = join(__dirname, "subscribers.json");
 const adapter = new JSONFile(file);
 const db = new Low(adapter, { subscriptions: [] });
 
-// Asegura estructura inicial aunque el fichero no exista todavía
 await db.read();
 if (!db.data || !Array.isArray(db.data.subscriptions)) {
   db.data = { subscriptions: [] };
   await db.write();
 }
 
-// API: guardar email
+// ===== Rutas utilitarias =====
+app.get("/", (req, res) => res.send("API OK"));
+app.get("/health", (req, res) => res.json({ ok: true }));
+
+// ===== API: guardar email =====
 app.post("/api/notify", async (req, res) => {
   const { email } = req.body || {};
   const re = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/i;
@@ -54,28 +72,25 @@ app.post("/api/notify", async (req, res) => {
   db.data.subscriptions.push({
     email: norm,
     created_at: new Date().toISOString(),
+    ip: req.ip,
   });
   await db.write();
 
   return res.status(201).json({ ok: true, message: "Suscripción creada" });
 });
 
-// Export CSV (PROTEGER con token simple)
+// ===== Export CSV (opcional, protegido por token) =====
 app.get("/admin/export.csv", async (req, res) => {
   const token = process.env.ADMIN_TOKEN;
-  if (
-    token &&
-    req.headers["x-admin-token"] !== token &&
-    req.query.token !== token
-  ) {
+  if (token && req.headers["x-admin-token"] !== token && req.query.token !== token) {
     return res.status(401).send("Unauthorized");
   }
 
   await db.read();
   const rows = db.data.subscriptions;
   const csv = [
-    "email,created_at",
-    ...rows.map((r) => `${r.email},${r.created_at}`),
+    "email,created_at,ip",
+    ...rows.map((r) => `${r.email},${r.created_at},${r.ip ?? ""}`),
   ].join("\n");
 
   res.setHeader("Content-Type", "text/csv; charset=utf-8");
@@ -83,10 +98,7 @@ app.get("/admin/export.csv", async (req, res) => {
   res.send(csv);
 });
 
-// Fallback a index.html (para rutas desconocidas)
-app.get("*", (req, res) => res.sendFile(join(__dirname, "index.html")));
-
-// Arranque
+// ===== Arranque =====
 app.listen(PORT, () => {
-  console.log(`🚀 Servidor en http://localhost:${PORT}`);
+  console.log(`🚀 API lista en puerto ${PORT}`);
 });
