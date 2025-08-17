@@ -21,22 +21,18 @@ app.use(helmet());
 app.use(morgan(process.env.NODE_ENV === "production" ? "combined" : "dev"));
 app.use(express.json());
 
-// ===== CORS: permite tu frontend en Hostinger =====
-const ALLOWED_ORIGINS = [
-  "https://nakedcode.es",
-  "https://www.nakedcode.es",
-];
+// ===== CORS (MODO DIAGNÓSTICO ABIERTO) =====
+// Abierto para descartar problemas de CORS. Luego lo restringimos.
 app.use(
   cors({
-    origin: (origin, cb) => {
-      // Permite también llamadas sin origin (curl/Postman)
-      if (!origin) return cb(null, true);
-      if (ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
-      return cb(new Error("Not allowed by CORS"));
-    },
-    methods: ["GET", "POST"],
+    origin: true, // permite cualquier origen TEMPORALMENTE
+    methods: ["GET", "POST", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "x-admin-token"],
+    credentials: false,
   })
 );
+// Responder preflight (OPTIONS)
+app.options("*", cors());
 
 // ===== Base de datos (lowdb con JSON) =====
 const file = join(__dirname, "subscribers.json");
@@ -102,4 +98,3 @@ app.get("/admin/export.csv", async (req, res) => {
 app.listen(PORT, () => {
   console.log(`🚀 API lista en puerto ${PORT}`);
 });
-
