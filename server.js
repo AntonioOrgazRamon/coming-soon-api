@@ -2,19 +2,19 @@ import express from "express";
 import helmet from "helmet";
 import morgan from "morgan";
 import cors from "cors";
-import { Pool } from "pg";
+import pkg from "pg";
+
+const { Pool } = pkg;
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-app.set("trust proxy", 1);
-
-// Seguridad + logs + JSON
+// 🛡️ Seguridad + logs + JSON
 app.use(helmet());
 app.use(morgan(process.env.NODE_ENV === "production" ? "combined" : "dev"));
 app.use(express.json());
 
-// CORS (ajusta origins si quieres restringir)
+// 🌍 CORS abierto (ajusta si quieres limitar dominios)
 app.use(
   cors({
     origin: true,
@@ -23,41 +23,18 @@ app.use(
 );
 app.options("*", cors());
 
-// ---------- POSTGRES ----------
-if (!process.env.DATABASE_URL) {
-  console.error("❌ Falta DATABASE_URL");
-}
-
+// 🗄️ Conexión a PostgreSQL (Neon)
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false }, // para Neon en Render
+  ssl: { rejectUnauthorized: false }, // necesario en Neon
 });
 
-async function ensureSchema() {
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS subscribers (
-      id SERIAL PRIMARY KEY,
-      email TEXT UNIQUE NOT NULL,
-      created_at TIMESTAMP DEFAULT NOW(),
-      ip TEXT
-    );
-  `);
-  console.log("✅ Tabla 'subscribers' lista");
-}
+// 🚑 Health check
+app.get("/health", (req, res) => res.json({ ok: true }));
 
-// Rutas utilitarias
-app.get("/", (req, res) => res.send("API OK"));
-app.get("/health", async (req, res) => {
-  try {
-    await pool.query("SELECT 1");
-    res.json({ ok: true, db: true });
-  } catch (e) {
-    res.status(500).json({ ok: false, db: false, error: e.message });
-  }
-});
-
-// API notify
+// 📩 Endpoint de suscripción
 app.post("/api/notify", async (req, res) => {
+  console.log("📩 POST recibido:", req.body, "desde IP:", req.ip);
   const { email } = req.body || {};
   const re = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/i;
 
@@ -68,31 +45,57 @@ app.post("/api/notify", async (req, res) => {
   const norm = String(email).trim().toLowerCase();
 
   try {
-    // inserta ignorando duplicados (por UNIQUE en email)
-    const result = await pool.query(
-      `INSERT INTO subscribers (email, ip)
-       VALUES ($1, $2)
-       ON CONFLICT (email) DO NOTHING
-       RETURNING id;`,
+    // Verificar si ya existe
+    const exists = await pool.query(
+      "SELECT 1 FROM subscribers WHERE email = $1",
+      [norm]
+    );
+
+    if (exists.rowCount > 0) {
+      return res.json({ ok: true, message: "Ya estabas suscrito" });
+    }
+
+    // Insertar en PostgreSQL
+    await pool.query(
+      "INSERT INTO subscribers (email, created_at, ip) VALUES ($1, NOW(), $2)",
       [norm, req.ip]
     );
 
-    if (result.rowCount === 0) {
-      return res.json({ ok: true, message: "Ya estabas suscrito" });
-    }
     return res.status(201).json({ ok: true, message: "Suscripción creada" });
   } catch (err) {
-    console.error("❌ Error insertando:", err);
-    return res.status(500).json({ ok: false, error: "DB error" });
+    console.error("❌ Error DB:", err);
+    return res.status(500).json({ ok: false, error: "Error en el servidor" });
   }
 });
 
-app.listen(PORT, async () => {
+// 📤 Exportar como CSV desde PostgreSQL
+app.get("/admin/export.csv", async (req, res) => {
   try {
-    await ensureSchema();
-    console.log(`🚀 API lista en puerto ${PORT}`);
-  } catch (e) {
-    console.error("❌ Error al iniciar:", e);
-    process.exit(1);
+    const result = await pool.query(
+      "SELECT email, created_at, ip FROM subscribers ORDER BY created_at DESC"
+    );
+
+    const rows = result.rows;
+    const csv = [
+      "email,created_at,ip",
+      ...rows.map(
+        (r) => `${r.email},${r.created_at.toISOString()},${r.ip ?? ""}`
+      ),
+    ].join("\n");
+
+    res.setHeader("Content-Type", "text/csv; charset=utf-8");
+    res.setHeader(
+      "Content-Disposition",
+      "attachment; filename=subscribers.csv"
+    );
+    res.send(csv);
+  } catch (err) {
+    console.error("❌ Error exportando CSV:", err);
+    res.status(500).send("Error exportando CSV");
   }
+});
+
+// 🚀 Arranque
+app.listen(PORT, () => {
+  console.log(`🚀 API lista en puerto ${PORT}`);
 });
